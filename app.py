@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 from flow import build_flow
 import os
+import shutil
 
 def check_ollama_status():
     try:
@@ -86,6 +87,13 @@ with st.sidebar:
             for key in list(st.session_state.keys()):
                 if key.startswith("approve_") or key.startswith("deny_"):
                     del st.session_state[key]
+            st.rerun()
+
+    with st.expander("🗑️ Advanced Cleanup"):
+        if st.button("Delete All Workspace Files", use_container_width=True):
+            if os.path.exists("workspace"):
+                shutil.rmtree("workspace") # Deletes the entire folder
+                os.makedirs("workspace")    # Recreates an empty one
             st.rerun()
 
 # --- MAIN UI ---

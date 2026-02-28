@@ -48,9 +48,20 @@ class PlanNode(Node):
             status_container = ui.status(f"🤖 **Assistant is thinking ({model_name})...**", expanded=True)
             status_container.write("🧠 Analyzing goal and breaking down steps...")
 
-        prompt = f"Goal: {goal}. Respond ONLY with a JSON array of tasks (mkdir, write_file, run_cmd)."
+        # --- Inside PlanNode.exec in nodes.py ---
+
+# Update the prompt to include 'read_file'
+        prompt = f"""Goal: {goal}.
+        Respond ONLY with a JSON array of task objects. DO NOT use plain strings.
+        Example: [{{"action": "mkdir", "target": "hello_flask"}}, {{"action": "write_file", "target": "hello_flask/app.py", "content": "# Code here"}}]
+        Allowed actions: mkdir, write_file, read_file, run_cmd."""
+
         if error_feedback:
-            prompt = f"Goal: {goal}. Previous error: {error_feedback}. Fix and provide a NEW JSON task list."
+            prompt = f"""User Goal: {goal}
+            The agent encountered an error: {error_feedback}
+            
+            You can use 'read_file' to inspect the code you wrote before trying to fix it.
+            Provide a NEW JSON task list to resolve the issue."""
 
         try:
             response = self._fetch_ollama(prompt, model_name)
@@ -92,9 +103,9 @@ class PlanNode(Node):
                     elif "action" in item:
                         new_tasks.append(item)
                     else:
-                        # Handles the hallucination: {"mkdir": "folder", "write_file": [...]}
+                        # Handles hallucinations like: {"mkdir": "folder", "write_file": [...]}
                         for key, val in item.items():
-                            if key in ["mkdir", "write_file", "run_cmd"]:
+                            if key in ["mkdir", "write_file", "read_file", "run_cmd"]:
                                 if isinstance(val, str):
                                     new_tasks.append({"action": key, "target": val})
                                 elif isinstance(val, list):
@@ -103,18 +114,23 @@ class PlanNode(Node):
                                             new_tasks.append({"action": key, "target": sub_item})
                                         elif isinstance(sub_item, dict):
                                             task_obj = {"action": key}
-                                            # Grab target from any weird key the LLM invents
-                                            task_obj["target"] = sub_item.get("target") or sub_item.get("path") or sub_item.get("file") or sub_item.get("dir")
+                                            task_obj["target"] = sub_item.get("target") or sub_item.get("path") or sub_item.get("file")
                                             if "content" in sub_item:
                                                 task_obj["content"] = sub_item["content"]
                                             new_tasks.append(task_obj)
-                            elif isinstance(val, list):
-                                new_tasks.extend(val)
 
             # Map remaining hallucinated keys to 'target'
             final_tasks = []
             for t in new_tasks:
+                # NEW: Salvage string commands! (e.g., "mkdir hello_flask")
+                if isinstance(t, str):
+                    parts = t.split(" ", 1)
+                    if len(parts) == 2 and parts[0] in ["mkdir", "write_file", "read_file", "run_cmd"]:
+                        final_tasks.append({"action": parts[0], "target": parts[1].strip("'\"")})
+                    continue 
+
                 if not isinstance(t, dict): continue
+
                 if "args" in t and isinstance(t["args"], list) and len(t["args"]) > 0:
                     t["target"] = t["args"][0]
                 if "path" in t and "target" not in t:
@@ -185,7 +201,8 @@ class ExecuteNode(Node):
         target = str(task.get("target") or task.get("path", "unknown"))
         
         # --- PATH FIX: Only modify the target if it's a file operation! ---
-        if action in ["mkdir", "write_file"]:
+        # Ensure read_file also stays inside the sandbox
+        if action in ["mkdir", "write_file", "read_file"]:
             if not target.startswith("workspace"):
                 target = os.path.join("workspace", target)
             
@@ -210,20 +227,29 @@ class ExecuteNode(Node):
             if action == "mkdir":
                 os.makedirs(target, exist_ok=True)
                 return f"Created directory: {target}"
+            
             elif action == "write_file":
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with open(target, "w") as f: 
                     f.write(task.get("content", ""))
                 return f"Wrote file: {target}"
+
+            # --- NEW TOOL: READ_FILE ---
+            elif action == "read_file":
+                if not os.path.exists(target):
+                    return f"❌ Error: File '{target}' does not exist."
+                with open(target, "r") as f:
+                    content = f.read()
+                return f"Content of {target}:\n\n{content}"
+            
             elif action == "run_cmd":
-                # --- EXECUTION FIX: Use 'cwd' to run safely inside the workspace ---
                 res = subprocess.run(
                     target, 
                     shell=True, 
                     capture_output=True, 
                     text=True, 
                     timeout=30,
-                    cwd="workspace" # This forces the terminal to open inside the workspace folder!
+                    cwd="workspace"
                 )
                 return res.stdout if res.returncode == 0 else f"Error: {res.stderr}"
         except Exception as e:
@@ -252,14 +278,32 @@ class ExecuteNode(Node):
         return "next_task" if shared["current_index"] < len(shared["tasks"]) else "done"
 
 class SummaryNode(Node):
-    def prep(self, shared): return {"tasks": shared.get("tasks", []), "ui": shared.get("ui")}
+    def prep(self, shared): return {"tasks": shared.get("tasks", []), "ui": shared.get("ui"), "error_feedback": shared.get("error_feedback")}
+    
     def exec(self, data):
-        msg = f"🎉 All {len(data['tasks'])} operations completed successfully!"
-        if data["ui"]: 
-            data["ui"].success(msg)
-            data["ui"].balloons()
+        ui = data["ui"]
+        tasks = data["tasks"]
+        error_feedback = data.get("error_feedback")
+        
+        # Logical Fallback: If we failed to get tasks or encountered a fatal error
+        if not tasks:
+            msg = "⚠️ I couldn't generate a valid technical plan for that request. Could you clarify or break down your goal?"
+            if error_feedback:
+                msg += f"\n\n**Details:** {error_feedback}"
+                
+            if ui: ui.warning(msg)
+            if "messages" in st.session_state:
+                st.session_state.messages.append({"role": "assistant", "content": msg})
+            return "Complete"
+            
+        # Success state
+        msg = f"🎉 All {len(tasks)} operations completed successfully!"
+        if ui: 
+            ui.success(msg)
+            ui.balloons()
             
         if "messages" in st.session_state:
             st.session_state.messages.append({"role": "assistant", "content": msg})
         return "Complete"
+        
     def post(self, shared, p, e): pass
