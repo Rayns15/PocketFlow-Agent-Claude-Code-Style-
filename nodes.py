@@ -58,6 +58,7 @@ class PlanNode(Node):
         CRITICAL RULES:
         1. If the user asks to *write a script* (bash, python, etc.), use 'write_file' to generate the code. DO NOT execute the actions the script is supposed to do using your own tools.
         2. Always use full paths (e.g., 'folder_name/file.txt').
+        3. NO SHORTCUTS: You must complete every single step of the user's goal sequentially. If the user asks for multiple files (e.g., a Python script AND a Bash script), you MUST generate a separate 'write_file' task for EACH one. Do not skip writing the code to just hallucinate the final output.
         
         Example: [{{"action": "mkdir", "target": "my_app"}}, {{"action": "write_file", "target": "my_app/script.sh", "content": "#!/bin/bash\\ncp a b"}}]
         Allowed actions: mkdir, write_file, read_file, run_cmd, copy."""

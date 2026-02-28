@@ -31,6 +31,20 @@ def get_workspace_files(startpath):
 
 st.set_page_config(page_title="PocketFlow Web Agent", page_icon="🤖")
 
+st.markdown("""
+    <style>
+        /* Prevent Streamlit from dimming/fading the screen during execution */
+        [data-testid="stAppViewBlockContainer"] {
+            opacity: 1 !important;
+            transition: none !important;
+        }
+        /* Keep buttons looking normal while the app is running */
+        .stButton > button {
+            transition: none !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 # Initialize chat history and state early
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -142,6 +156,16 @@ if st.session_state.agent_running:
         ui_block = st.container()
         st.session_state.shared["ui"] = ui_block
         
+        col1, col2 = st.columns([0.8, 0.2])
+        with col2:
+            if st.button("🛑 STOP", type="primary", use_container_width=True):
+                st.session_state.agent_running = False
+                st.session_state.shared["tasks"] = None 
+                
+                stop_msg = "🛑 **Execution stopped by user.**"
+                st.session_state.messages.append({"role": "assistant", "content": stop_msg})
+                st.rerun()
+
         try:
             app_flow = build_flow()
             app_flow.run(st.session_state.shared)
