@@ -56,14 +56,4 @@ The agent's logic is defined in `nodes.py` and routed in `flow.py` using a 3-nod
 * **ExecuteNode:** Acts as a tool dispatcher. Loops through the planned tasks. If the task is safe (`mkdir`, `write_file`), it executes it. If it is a terminal command (`run_cmd`), it halts and waits for user approval.
 * **SummaryNode:** Catches the completion state and cleans up the flow.
 
-```
-
-***
-
-Now your project is officially documented! 
-
-Picking up right where your copy-paste left off—would you like me to show you how to upgrade the `run_cmd` tool using Python's `subprocess` module so it actually executes those terminal commands on your machine instead of just printing a mocked simulation message?
-
-```
-
 ![Style](https://github.com/Rayns15/PocketFlow-Agent-Claude-Code-Style-/blob/262631ced90cd6f711b6422dc29a35f2cc8c2d4e/Claude%20Code%20Style.jpg)
