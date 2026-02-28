@@ -4,7 +4,7 @@ A local, autonomous AI agent built with the **PocketFlow** framework, powered by
 
 This agent takes high-level user goals, breaks them down into actionable steps, and executes them on your local machine using actual file system tools. It features a "Human-in-the-Loop" safeguard that pauses execution to ask for your permission before running any terminal commands, as well as a self-healing ReAct loop to fix its own errors.
 
-![Claude Code Style UI](Claude%20Code%20Style.jpg)
+![Claude Code Style UI](https://github.com/Rayns15/PocketFlow-Agent-Claude-Code-Style-/blob/fdb1299e666173efa84df32d0641500fd22b82a0/Claude%20Code%20Style.jpg)
 
 ## ✨ Advanced Features
 
