@@ -65,3 +65,5 @@ Now your project is officially documented!
 Picking up right where your copy-paste left off—would you like me to show you how to upgrade the `run_cmd` tool using Python's `subprocess` module so it actually executes those terminal commands on your machine instead of just printing a mocked simulation message?
 
 ```
+
+![Visual Studio Code](https://img.shields.io/badge/Visual%20Studio%20Code-0078d7.svg?style=for-the-badge&logo=visual-studio-code&logoColor=white)
