@@ -1,4 +1,3 @@
-```markdown
 # 🤖 PocketFlow Agent (Claude Code Style)
 
 A local, autonomous AI agent built with the **PocketFlow** framework, powered by **Ollama**, and featuring a beautiful **Streamlit** Web UI. 
@@ -26,8 +25,6 @@ This agent takes high-level user goals, breaks them down into actionable steps, 
 2. Install the required Python dependencies:
    ```bash
    pip install -r requirements.txt
-
-```
 
 ## 🎮 How to Run
 
