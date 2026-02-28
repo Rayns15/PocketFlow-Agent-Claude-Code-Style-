@@ -7,254 +7,259 @@ import sys
 import itertools
 import streamlit as st
 from pocketflow import Node
+import subprocess
+import re
 
-class Spinner:
-    """A simple context manager for a terminal loading spinner."""
-    def __init__(self, message="Thinking..."):
-        self.spinner = itertools.cycle(['-', '\\', '|', '/'])
-        self.stop_running = False
-        self.message = message
-        self.thread = threading.Thread(target=self.spin)
+if not os.path.exists("workspace"):
+    os.makedirs("workspace")
+    gitignore_path = os.path.join("workspace", ".gitignore")
+    with open(gitignore_path, "w") as f:
+        f.write("*\n!.gitignore\n")
 
-    def spin(self):
-        while not self.stop_running:
-            sys.stdout.write(f'\r{self.message} {next(self.spinner)}')
-            sys.stdout.flush()
-            time.sleep(0.1)
-        # Clear the spinner line when done
-        sys.stdout.write('\r' + ' ' * (len(self.message) + 2) + '\r')
-        sys.stdout.flush()
-
-    def __enter__(self):
-        self.thread.start()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop_running = True
-        self.thread.join()
+def is_safe_path(target_path, base_dir):
+    """Ensures the agent stays within the allowed workspace directory."""
+    if not target_path or target_path == "unknown":
+        return False
+    abs_base = os.path.abspath(base_dir)
+    abs_target = os.path.abspath(os.path.join(abs_base, target_path))
+    return abs_target.startswith(abs_base)
 
 class PlanNode(Node):
-    """Takes the user's goal and breaks it down into actionable tasks via Ollama."""
     def prep(self, shared):
         return {
             "goal": shared.get("user_goal"),
             "tasks": shared.get("tasks"), 
-            "model": shared.get("model", "gemma"), # Pull the model name, default to gemma
-            "ui": shared.get("ui")
+            "model": shared.get("model", "gemma"),
+            "ui": shared.get("ui"),
+            "error_feedback": shared.get("error_feedback")
         }
         
+    def _fetch_ollama(self, prompt, model):
+        return requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False, "format": "json"}
+        )
+
     def exec(self, prep_data):
-        goal = prep_data["goal"]
-        tasks = prep_data["tasks"]
-        model_name = prep_data["model"]
-        ui = prep_data["ui"]
-        
-        if tasks is not None:
-            if ui: ui.info("🔄 Resuming execution from paused state...")
-            return tasks
+        goal, tasks, model_name, ui, error_feedback = prep_data.values()
+        if tasks is not None: return tasks
 
-        msg = f"🤔 PLANNING: Asking Ollama ({model_name}) to break down goal -> '{goal}'"
-        if ui: ui.info(msg)
-        else: print(f"\n{msg}")
-        
-        prompt = f"""
-        You are an AI planner. The user's goal is: "{goal}"
-        Break this down into a JSON list of tasks.
-        Valid actions are:
-        - "mkdir": requires a "target" (directory name)
-        - "write_file": requires a "target" (file path) and "content" (string)
-        - "run_cmd": requires a "target" (terminal command)
-        
-        Respond ONLY with a valid JSON array, nothing else. Example:
-        [
-          {{"action": "mkdir", "target": "my_folder"}},
-          {{"action": "write_file", "target": "my_folder/script.py", "content": "print('hello')"}},
-          {{"action": "run_cmd", "target": "python my_folder/script.py"}}
-        ]
-        """
-        
+        if ui:
+            status_container = ui.status(f"🤖 **Assistant is thinking ({model_name})...**", expanded=True)
+            status_container.write("🧠 Analyzing goal and breaking down steps...")
+
+        prompt = f"Goal: {goal}. Respond ONLY with a JSON array of tasks (mkdir, write_file, run_cmd)."
+        if error_feedback:
+            prompt = f"Goal: {goal}. Previous error: {error_feedback}. Fix and provide a NEW JSON task list."
+
         try:
-            if not ui:
-                with Spinner(f"Waiting for {model_name} to generate plan..."):
-                    response = self._fetch_ollama(prompt, model_name)
-            else:
-                with ui.status(f"Waiting for {model_name} to generate plan...", expanded=True):
-                    response = self._fetch_ollama(prompt, model_name)
+            response = self._fetch_ollama(prompt, model_name)
+            if ui: status_container.write("📋 Formatting the plan into actionable steps...")
             
-            result_text = response.json().get("response", "[]")
-            new_tasks = json.loads(result_text)
+            raw_text = response.json().get("response", "[]")
             
-            if isinstance(new_tasks, dict):
-                if "action" in new_tasks:
-                    new_tasks = [new_tasks]
-                else:
-                    extracted_list = []
-                    for value in new_tasks.values():
-                        if isinstance(value, list):
-                            extracted_list = value
-                            break
-                    new_tasks = extracted_list if extracted_list else [new_tasks]
+            # --- THE ULTIMATE JSON HEALER ---
+            decoder = json.JSONDecoder()
+            parsed_data = []
+            text_to_parse = raw_text
             
-            if not isinstance(new_tasks, list):
-                new_tasks = [new_tasks]
+            while text_to_parse:
+                start_dict = text_to_parse.find('{')
+                start_list = text_to_parse.find('[')
+                
+                starts = [i for i in (start_dict, start_list) if i != -1]
+                if not starts:
+                    break 
+                    
+                start_idx = min(starts)
+                text_to_parse = text_to_parse[start_idx:]
+                
+                try:
+                    obj, idx = decoder.raw_decode(text_to_parse)
+                    parsed_data.append(obj)
+                    text_to_parse = text_to_parse[idx:] 
+                except json.JSONDecodeError:
+                    text_to_parse = text_to_parse[1:]
+                    
+            # --- THE SCHEMA MAPPER (Fixes the errors in your screenshots) ---
+            new_tasks = []
+            for item in parsed_data:
+                if isinstance(item, list):
+                    new_tasks.extend(item)
+                elif isinstance(item, dict):
+                    if "tasks" in item and isinstance(item["tasks"], list):
+                        new_tasks.extend(item["tasks"])
+                    elif "action" in item:
+                        new_tasks.append(item)
+                    else:
+                        # Handles the hallucination: {"mkdir": "folder", "write_file": [...]}
+                        for key, val in item.items():
+                            if key in ["mkdir", "write_file", "run_cmd"]:
+                                if isinstance(val, str):
+                                    new_tasks.append({"action": key, "target": val})
+                                elif isinstance(val, list):
+                                    for sub_item in val:
+                                        if isinstance(sub_item, str):
+                                            new_tasks.append({"action": key, "target": sub_item})
+                                        elif isinstance(sub_item, dict):
+                                            task_obj = {"action": key}
+                                            # Grab target from any weird key the LLM invents
+                                            task_obj["target"] = sub_item.get("target") or sub_item.get("path") or sub_item.get("file") or sub_item.get("dir")
+                                            if "content" in sub_item:
+                                                task_obj["content"] = sub_item["content"]
+                                            new_tasks.append(task_obj)
+                            elif isinstance(val, list):
+                                new_tasks.extend(val)
 
-            return new_tasks
+            # Map remaining hallucinated keys to 'target'
+            final_tasks = []
+            for t in new_tasks:
+                if not isinstance(t, dict): continue
+                if "args" in t and isinstance(t["args"], list) and len(t["args"]) > 0:
+                    t["target"] = t["args"][0]
+                if "path" in t and "target" not in t:
+                    t["target"] = t["path"]
+                if "file" in t and "target" not in t:
+                    t["target"] = t["file"]
+                    
+                if "action" in t and "target" in t:
+                    final_tasks.append(t)
+            
+            if not final_tasks:
+                raise ValueError(f"No valid tasks found. Model output: {raw_text[:100]}...")
+                
+            if ui:
+                status_container.update(label="✅ Plan Generated Successfully!", state="complete", expanded=False)
+                
+            return final_tasks
             
         except Exception as e:
-            err_msg = f"❌ Failed to get plan from Ollama: {e}"
+            err_msg = f"❌ Planning Failed: {str(e)}"
             if ui: 
+                status_container.update(label="❌ Planning Failed", state="error")
                 ui.error(err_msg)
-                ui.warning(f"Please ensure your local Ollama server is running and the '{model_name}' model is loaded.")
-                st.stop()
-            else: 
-                print(f"\n{err_msg}")
-                sys.exit(1)
-            
-    def _fetch_ollama(self, prompt, model_name):
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={"model": model_name, "prompt": prompt, "stream": False, "format": "json"}
-        )
-        response.raise_for_status()
-        return response
-        
+            if "messages" in st.session_state:
+                st.session_state.messages.append({"role": "assistant", "content": err_msg})
+            return []
+
     def post(self, shared, prep_res, tasks):
-        ui = shared.get("ui")
-        shared["tasks"] = tasks
-        
-        if "current_index" not in shared or shared["current_index"] == 0:
+        if shared.get("tasks") is None:
+            shared["tasks"] = tasks
             shared["current_index"] = 0
-            if ui:
-                ui.success(f"📋 Created a checklist of {len(tasks)} tasks.")
-                ui.json(tasks) 
-            else:
-                print(f"📋 Created a checklist of {len(tasks)} tasks.\n" + "-"*40)
+            if "error_feedback" in shared: del shared["error_feedback"]
             
+            ui = shared.get("ui")
+            if tasks:
+                task_str = "\n".join([f"* **{t.get('action', 'unknown')}**: `{t.get('target', 'unknown')}`" for t in tasks])
+                history_msg = f"📋 **Plan Generated:**\n{task_str}"
+                
+                if "messages" in st.session_state:
+                    st.session_state.messages.append({"role": "assistant", "content": history_msg})
+                if ui: ui.markdown(history_msg)
+            else:
+                msg = "❌ No valid tasks were generated by the model."
+                if "messages" in st.session_state:
+                    st.session_state.messages.append({"role": "assistant", "content": msg})
+                if ui: ui.error(msg)
+                
         return "next_task"
 
 class ExecuteNode(Node):
-    """Acts as a Tool Dispatcher with Human-in-the-Loop safety."""
     def prep(self, shared):
-        index = shared["current_index"]
-        return {
-            "task": shared["tasks"][index],
-            "index": index,
-            "ui": shared.get("ui")
-        }
+        tasks = shared.get("tasks", [])
+        index = shared.get("current_index", 0)
         
-    def exec(self, prep_data):
-        task = prep_data["task"]
-        index = prep_data["index"]
-        ui = prep_data["ui"]
-        
-        if isinstance(task, str):
-            msg = f"📝 NOTE: Skipping text description -> '{task}'"
-            if ui: ui.info(msg)
-            else: print(f"\n{msg}")
-            return "Skipped text description."
+        if not tasks or index >= len(tasks):
+            return {"error": "End of plan", "ui": shared.get("ui")}
+            
+        return {"task": tasks[index], "index": index, "ui": shared.get("ui")}
 
+    def exec(self, prep_data):
+        if "error" in prep_data:
+            return "Done"
+            
+        task, index, ui = prep_data.values()
+        if isinstance(task, str): return "Skipped text description."
+        
         action = task.get("action")
-        target = task.get("target")
+        target = str(task.get("target") or task.get("path", "unknown"))
         
-        msg = f"⚙️ **TOOL CALL:** `[{action}]` -> `{target}`"
-        if ui: ui.write(msg)
-        else: print(f"\n⚙️  TOOL CALL: [{action}] -> '{target}'")
-        
-        # --- FEATURE 1: HUMAN-IN-THE-LOOP WITH STREAMLIT BUTTONS ---
+        # --- PATH FIX: Only modify the target if it's a file operation! ---
+        if action in ["mkdir", "write_file"]:
+            if not target.startswith("workspace"):
+                target = os.path.join("workspace", target)
+            
+            if not is_safe_path(target, "workspace"):
+                 return f"❌ SECURITY ERROR: Access to '{target}' is denied."
+        # ------------------------------------------------------------------
+
         if action == "run_cmd":
             if ui:
-                # We use the current task index to track approvals
                 approval_key = f"approve_{index}"
-                denial_key = f"deny_{index}"
-                
-                # Check if this specific command was already approved/denied
-                if st.session_state.get(approval_key):
-                    ui.success(f"✅ User approved: `{target}`")
-                elif st.session_state.get(denial_key):
-                    ui.error(f"❌ User denied: `{target}`")
-                    return "Action cancelled by user."
-                else:
-                    ui.warning(f"⚠️ The agent wants to execute: `{target}`")
+                if not st.session_state.get(approval_key):
+                    ui.warning(f"⚠️ **Approval Required**: Run `{target}`?")
                     col1, col2 = ui.columns(2)
-                    
-                    # Define quick callbacks for our buttons
-                    def set_approved(): st.session_state[approval_key] = True
-                    def set_denied(): st.session_state[denial_key] = True
+                    if col1.button("✅ Approve", key=f"btn_app_{index}"):
+                        st.session_state[approval_key] = True
+                        st.rerun() 
+                    if col2.button("❌ Deny", key=f"btn_deny_{index}"):
+                        return "❌ Action denied by user."
+                    st.stop() 
 
-                    with col1:
-                        st.button("✅ Approve", on_click=set_approved, key=f"btn_app_{index}")
-                    with col2:
-                        st.button("❌ Deny", on_click=set_denied, key=f"btn_den_{index}")
-                        
-                    # Stop execution here until the user clicks a button
-                    st.stop()
-            else:
-                print(f"⚠️  WARNING: The agent wants to execute a terminal command.")
-                approval = input(f"Allow running `{target}`? (y/n): ")
-                if approval.lower() != 'y':
-                    return "❌ Action cancelled by user."
-        
-        time.sleep(1) 
-        
-        # --- FEATURE 2: REAL FILE SYSTEM TOOLS ---
         try:
             if action == "mkdir":
                 os.makedirs(target, exist_ok=True)
                 return f"Created directory: {target}"
-                
             elif action == "write_file":
-                content = task.get("content", "")
-                with open(target, "w") as f:
-                    f.write(content)
-                return f"Wrote {len(content)} bytes to {target}"
-                
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "w") as f: 
+                    f.write(task.get("content", ""))
+                return f"Wrote file: {target}"
             elif action == "run_cmd":
-                return f"Executed command (Mocked simulation)."
-                
-            else:
-                return f"Unknown tool action: {action}"
-                
+                # --- EXECUTION FIX: Use 'cwd' to run safely inside the workspace ---
+                res = subprocess.run(
+                    target, 
+                    shell=True, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=30,
+                    cwd="workspace" # This forces the terminal to open inside the workspace folder!
+                )
+                return res.stdout if res.returncode == 0 else f"Error: {res.stderr}"
         except Exception as e:
-            return f"❌ Error executing {action}: {str(e)}"
-        
+            return f"❌ Error: {str(e)}"
+
     def post(self, shared, prep_res, result):
+        if result == "Done":
+            return "done"
+            
+        task = shared["tasks"][shared["current_index"]]
         ui = shared.get("ui")
         
-        if ui:
-            ui.write(f"✅ **RESULT:** {result}")
-            ui.divider()
-        else:
-            print(f"✅ RESULT: {result}")
-            
-        shared["current_index"] += 1
+        history_msg = f"⚙️ **Executed:** `{task.get('action')}` on `{task.get('target')}`\n✅ **Result:**\n```text\n{result}\n```"
         
-        if shared["current_index"] < len(shared["tasks"]):
-            return "next_task"
-        else:
-            return "done"
+        if "messages" in st.session_state:
+            st.session_state.messages.append({"role": "assistant", "content": history_msg})
+        if ui: ui.markdown(history_msg)
+
+        if "Error" in result or "❌" in result:
+            shared["error_feedback"] = result
+            shared["tasks"] = None 
+            shared["current_index"] = 0 
+            return "replan"
+
+        shared["current_index"] += 1
+        return "next_task" if shared["current_index"] < len(shared["tasks"]) else "done"
 
 class SummaryNode(Node):
-    """Catches the 'done' state to end the flow cleanly."""
-    def prep(self, shared):
-        return {
-            "tasks": shared["tasks"],
-            "ui": shared.get("ui")
-        }
-        
-    def exec(self, prep_data):
-        tasks = prep_data["tasks"]
-        ui = prep_data["ui"]
-        
-        msg = f"🎉 All {len(tasks)} operations completed successfully! Returning control."
-        
-        if ui:
-            ui.success(msg)
-            ui.balloons() # Added a fun little celebration for the web UI!
-        else:
-            print("-" * 40)
-            print(msg)
+    def prep(self, shared): return {"tasks": shared.get("tasks", []), "ui": shared.get("ui")}
+    def exec(self, data):
+        msg = f"🎉 All {len(data['tasks'])} operations completed successfully!"
+        if data["ui"]: 
+            data["ui"].success(msg)
+            data["ui"].balloons()
             
-        return None
-        
-    def post(self, shared, prep_res, exec_res):
-        pass
+        if "messages" in st.session_state:
+            st.session_state.messages.append({"role": "assistant", "content": msg})
+        return "Complete"
+    def post(self, shared, p, e): pass
