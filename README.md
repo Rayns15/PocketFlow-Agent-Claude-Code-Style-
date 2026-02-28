@@ -66,4 +66,4 @@ Picking up right where your copy-paste left off—would you like me to show you 
 
 ```
 
-![Style](hhttps://github.com/Rayns15/PocketFlow-Agent-Claude-Code-Style-/blob/262631ced90cd6f711b6422dc29a35f2cc8c2d4e/Claude%20Code%20Style.jpg)
+![Style](https://github.com/Rayns15/PocketFlow-Agent-Claude-Code-Style-/blob/262631ced90cd6f711b6422dc29a35f2cc8c2d4e/Claude%20Code%20Style.jpg)
