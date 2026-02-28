@@ -65,16 +65,3 @@ The agent is currently equipped with three core capabilities:
 ## 🧹 Memory Management
 
 The Web UI leverages `st.session_state` to remember chat history, agent tasks, and tool approvals across re-runs. You can clear the visual chat or wipe the agent's entire short-term memory using the dedicated cleanup buttons in the sidebar.
-
-```
-
-***
-
-### What's Next?
-You now have a fully functional foundation! If you ever want to expand this project, you could easily add more tools to the `ExecuteNode`—such as a `read_file` tool (so the agent can read existing code and edit it) or a `web_search` tool! 
-
-Would you like me to help you brainstorm how to add a `read_file` tool to your agent's repertoire next?
-
-```
-
-![Style](https://github.com/Rayns15/PocketFlow-Agent-Claude-Code-Style-/blob/262631ced90cd6f711b6422dc29a35f2cc8c2d4e/Claude%20Code%20Style.jpg)
