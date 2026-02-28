@@ -57,6 +57,26 @@ with st.sidebar:
                 with open(full_path, "rb") as f:
                     st.download_button("💾 Download", f, file_name=filename, key=f"dl_{rel_path}")
 
+    with st.expander("🗑️ Advanced Cleanup"):
+        if st.button("Delete All Workspace Files", use_container_width=True):
+            if os.path.exists("workspace"):
+                # Instead of deleting the folder, we delete its contents
+                for filename in os.listdir("workspace"):
+                    file_path = os.path.join("workspace", filename)
+                    try:
+                        if os.path.isfile(file_path) or os.path.islink(file_path):
+                            os.unlink(file_path) # Delete file or link
+                        elif os.path.isdir(file_path):
+                            shutil.rmtree(file_path, ignore_errors=True) # Delete sub-directory
+                    except Exception as e:
+                        st.error(f"Failed to delete {file_path}. Reason: {e}")
+                
+                # Re-ensure .gitignore exists so the workspace stays clean in Git
+                gitignore_path = os.path.join("workspace", ".gitignore")
+                with open(gitignore_path, "w") as f:
+                    f.write("*\n!.gitignore\n")
+            st.rerun()
+
     st.subheader("🔌 System Status")
     server_online = check_ollama_status()
     
@@ -87,13 +107,6 @@ with st.sidebar:
             for key in list(st.session_state.keys()):
                 if key.startswith("approve_") or key.startswith("deny_"):
                     del st.session_state[key]
-            st.rerun()
-
-    with st.expander("🗑️ Advanced Cleanup"):
-        if st.button("Delete All Workspace Files", use_container_width=True):
-            if os.path.exists("workspace"):
-                shutil.rmtree("workspace") # Deletes the entire folder
-                os.makedirs("workspace")    # Recreates an empty one
             st.rerun()
 
 # --- MAIN UI ---

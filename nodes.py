@@ -7,6 +7,7 @@ import sys
 import itertools
 import streamlit as st
 from pocketflow import Node
+import shutil
 import subprocess
 import re
 
@@ -53,12 +54,22 @@ class PlanNode(Node):
 # Update the prompt to include 'read_file'
         prompt = f"""Goal: {goal}.
         Respond ONLY with a JSON array of task objects. DO NOT use plain strings.
-        Example: [{{"action": "mkdir", "target": "hello_flask"}}, {{"action": "write_file", "target": "hello_flask/app.py", "content": "# Code here"}}]
-        Allowed actions: mkdir, write_file, read_file, run_cmd."""
+        
+        CRITICAL RULES:
+        1. If the user asks to *write a script* (bash, python, etc.), use 'write_file' to generate the code. DO NOT execute the actions the script is supposed to do using your own tools.
+        2. Always use full paths (e.g., 'folder_name/file.txt').
+        
+        Example: [{{"action": "mkdir", "target": "my_app"}}, {{"action": "write_file", "target": "my_app/script.sh", "content": "#!/bin/bash\\ncp a b"}}]
+        Allowed actions: mkdir, write_file, read_file, run_cmd, copy."""
 
+        # 2. Update the error feedback prompt to remind it of the JSON schema
         if error_feedback:
             prompt = f"""User Goal: {goal}
             The agent encountered an error: {error_feedback}
+            
+            CRITICAL: You MUST respond ONLY with a JSON array of task objects to fix this.
+            Example: [{{"action": "write_file", "target": "fixed_file.txt", "content": "..."}}]
+            Allowed actions: mkdir, write_file, read_file, run_cmd, copy.
             
             You can use 'read_file' to inspect the code you wrote before trying to fix it.
             Provide a NEW JSON task list to resolve the issue."""
@@ -100,12 +111,15 @@ class PlanNode(Node):
                 elif isinstance(item, dict):
                     if "tasks" in item and isinstance(item["tasks"], list):
                         new_tasks.extend(item["tasks"])
+                    # 👇 ADD THIS ELIF BLOCK to catch the "actions" wrapper 👇
+                    elif "actions" in item and isinstance(item["actions"], list):
+                        new_tasks.extend(item["actions"])
                     elif "action" in item:
                         new_tasks.append(item)
                     else:
                         # Handles hallucinations like: {"mkdir": "folder", "write_file": [...]}
                         for key, val in item.items():
-                            if key in ["mkdir", "write_file", "read_file", "run_cmd"]:
+                            if key in ["mkdir", "write_file", "read_file", "run_cmd","copy"]:
                                 if isinstance(val, str):
                                     new_tasks.append({"action": key, "target": val})
                                 elif isinstance(val, list):
@@ -125,7 +139,7 @@ class PlanNode(Node):
                 # NEW: Salvage string commands! (e.g., "mkdir hello_flask")
                 if isinstance(t, str):
                     parts = t.split(" ", 1)
-                    if len(parts) == 2 and parts[0] in ["mkdir", "write_file", "read_file", "run_cmd"]:
+                    if len(parts) == 2 and parts[0] in ["mkdir", "write_file", "read_file", "run_cmd","copy"]:
                         final_tasks.append({"action": parts[0], "target": parts[1].strip("'\"")})
                     continue 
 
@@ -202,7 +216,7 @@ class ExecuteNode(Node):
         
         # --- PATH FIX: Only modify the target if it's a file operation! ---
         # Ensure read_file also stays inside the sandbox
-        if action in ["mkdir", "write_file", "read_file"]:
+        if action in ["mkdir", "write_file", "read_file","copy"]:
             if not target.startswith("workspace"):
                 target = os.path.join("workspace", target)
             
@@ -242,6 +256,25 @@ class ExecuteNode(Node):
                     content = f.read()
                 return f"Content of {target}:\n\n{content}"
             
+            elif action == "copy":
+                source = task.get("source")
+                if not source:
+                    return "❌ Error: 'copy' action requires a 'source' parameter."
+                
+                # Make sure the source path is safe and inside the workspace
+                if not source.startswith("workspace"):
+                    source = os.path.join("workspace", source)
+                if not is_safe_path(source, "workspace"):
+                    return f"❌ SECURITY ERROR: Access to source '{source}' is denied."
+                    
+                if not os.path.exists(source):
+                    return f"❌ Error: Source file '{source}' does not exist."
+                    
+                # Create the destination directory if it doesn't exist, then copy
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copy2(source, target)
+                return f"Copied {source} to {target}"
+
             elif action == "run_cmd":
                 res = subprocess.run(
                     target, 
@@ -252,6 +285,10 @@ class ExecuteNode(Node):
                     cwd="workspace"
                 )
                 return res.stdout if res.returncode == 0 else f"Error: {res.stderr}"
+            
+            else:
+                return f"❌ Error: Unknown action '{action}'. You must only use allowed actions (mkdir, write_file, read_file, run_cmd)."
+            
         except Exception as e:
             return f"❌ Error: {str(e)}"
 
@@ -259,20 +296,47 @@ class ExecuteNode(Node):
         if result == "Done":
             return "done"
             
+        if result is None:
+            result = "❌ Error: Execution returned no result."
+
         task = shared["tasks"][shared["current_index"]]
         ui = shared.get("ui")
         
-        history_msg = f"⚙️ **Executed:** `{task.get('action')}` on `{task.get('target')}`\n✅ **Result:**\n```text\n{result}\n```"
+        history_msg = f"⚙️ **Executed:** `{task.get('action')}` on `{task.get('target', task.get('source', 'unknown'))}`\n✅ **Result:**\n```text\n{result}\n```"
         
         if "messages" in st.session_state:
             st.session_state.messages.append({"role": "assistant", "content": history_msg})
         if ui: ui.markdown(history_msg)
 
-        if "Error" in result or "❌" in result:
+        # Did we hit an error?
+        if "Error" in str(result) or "❌" in str(result):
+            # --- THE CIRCUIT BREAKER ---
+            retries = shared.get("retry_count", 0)
+            max_retries = 3
+            
+            if retries >= max_retries:
+                # We've tried too many times. Kill the process and move to SummaryNode.
+                fatal_msg = f"🛑 **Agent Stopped:** Reached maximum replan attempts ({max_retries}/{max_retries}) without resolving the issue."
+                if ui: ui.error(fatal_msg)
+                if "messages" in st.session_state:
+                    st.session_state.messages.append({"role": "assistant", "content": fatal_msg})
+                
+                shared["tasks"] = None # Setting this to None forces SummaryNode into its failure state
+                shared["error_feedback"] = result
+                return "done" 
+            
+            # If under the limit, increment the counter and replan!
+            shared["retry_count"] = retries + 1
+            if ui: 
+                ui.warning(f"⚠️ Encountered an error. Replanning to fix it... (Attempt {shared['retry_count']}/{max_retries})")
+            
             shared["error_feedback"] = result
             shared["tasks"] = None 
             shared["current_index"] = 0 
             return "replan"
+
+        # If the task succeeded, reset the retry counter for the next task!
+        shared["retry_count"] = 0 
 
         shared["current_index"] += 1
         return "next_task" if shared["current_index"] < len(shared["tasks"]) else "done"
